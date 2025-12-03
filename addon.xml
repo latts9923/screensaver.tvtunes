@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon id="screensaver.tvtunes" name="TvTunesScreensaver" version="100.4.1" provider-name="latts">
+<addon id="screensaver.tvtunes" name="TvTunesScreensaver" version="1.0.1" provider-name="latts">
 	<requires>
-		<import addon="xbmc.python" version="2.20.0"/>
+		<import addon="xbmc.python" version="3.0.0"/>
 		<import addon="script.module.simplejson" version="3.3.0"/>
 		<import addon="service.tvtunes" version="1.0.0"/>
 	</requires>
@@ -12,6 +12,10 @@
 		<description lang="en">The TvTunes Screensaver makes use of the themes configured in your library to use them as a screensaver.</description>
 		<language></language>
 		<platform>all</platform>
+		<news>[B][COLOR=FF2CD13B]v1.0.1[/COLOR][/B] - Release date November 27, 2025[CR]
+[B][COLOR=FF13BFBF]INFO[/COLOR][/B]
+• Initial release for Kodi 19.x/20.x/21.x/22.
+		</news>
 		<license>See LICENSE.txt</license>
 		<forum>https://github.com/latts9923/screensaver.tvtunes</forum>
 		<assets>
