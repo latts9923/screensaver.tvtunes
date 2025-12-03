@@ -27,8 +27,8 @@ from settings import normalize_string
 from themeFinder import ThemeFiles
 
 ADDON = xbmcaddon.Addon(id='screensaver.tvtunes')
-CWD = ADDON.getAddonInfo('path').decode("utf-8")
-MEDIA_DIR = xbmc.translatePath(os.path.join(CWD, 'resources', 'media').encode("utf-8")).decode("utf-8")
+CWD = ADDON.getAddonInfo('path')
+MEDIA_DIR = xbmcvfs.translatePath(os.path.join(CWD, 'resources', 'media').encode("utf-8"))
 
 
 # Helper method to allow the cycling through a list of values
@@ -462,7 +462,7 @@ class ScreensaverBase(object):
     def _init_cycle_controls(self):
         log('Screensaver: init_cycle_controls start')
         dimSetting = ScreensaverSettings.getDimValue()
-        for i in xrange(self.getImageControlCount()):
+        for i in range(self.getImageControlCount()):
             img_control = xbmcgui.ControlImage(0, 0, 0, 0, '', aspectRatio=1, colorDiffuse=dimSetting)
             self.image_controls.append(img_control)
 
@@ -517,7 +517,7 @@ class ScreensaverBase(object):
         imageGroup_cycle = _cycle(imageGroups)
         image_controls_cycle = _cycle(self.image_controls)
         self._hide_loading_indicator()
-        imageGroup = imageGroup_cycle.next()
+        imageGroup = next(imageGroup_cycle)
 
         # Force the data to load for the first entry (Need that immediately)
         imageDetails = imageGroup.getNextImage()
@@ -532,8 +532,14 @@ class ScreensaverBase(object):
             # Start playing theme if there is one
             imageGroup.startTheme(self.getFastImageCount())
             # Get the next control and set it displaying the image
-            image_control = image_controls_cycle.next()
-            self.process_image(image_control, imageDetails)
+            image_control = next(image_controls_cycle)
+            
+            if isinstance(image_control, bytes):
+                image_control_str = image_control.decode('utf-8')
+            else:
+                image_control_str = image_control # It's already a string
+
+            self.process_image(image_control_str, imageDetails)
             # Now that we are showing the last image, load up the next one
             imageDetails = imageGroup.getNextImage()
 
@@ -547,11 +553,11 @@ class ScreensaverBase(object):
             if (len(imageGroups) > 1) and imageGroup.completedGroup():
                 log("Screensaver: Moving to play next group")
                 # Move onto the next group, and the first image in that group
-                imageGroup = imageGroup_cycle.next()
+                imageGroup = next(imageGroup_cycle)
                 # If there are no images in this group, skip to the next (We know there
                 # is at least one group with images as we have already checked that before the loop)
                 while imageGroup.imageCount(True) < 1:
-                    imageGroup = imageGroup_cycle.next()
+                    imageGroup = next(imageGroup_cycle)
                 # Get the next image from the new group
                 imageDetails = imageGroup.getNextImage()
 
@@ -559,7 +565,7 @@ class ScreensaverBase(object):
                 self.image_count += 1
             else:
                 # Pre-load the next image that is going to be shown
-                self._preload_image(imageDetails['file'])
+                self._preload_image(imageDetails['file'].decode('utf-8'))
                 # Wait before showing the next image
                 self.wait()
 
@@ -792,7 +798,7 @@ class TableDropScreensaver(ScreensaverBase):
                       ('conditional', self.ROTATE_ANIMATION % (rotation_degrees, rotation_duration)),
                       ('conditional', self.DROP_ANIMATION % (drop_height, drop_duration))]
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'])
+        image_control.setImage(imageDetails['file'].decode('utf-8'))
         image_control.setPosition(x_position, y_position)
         image_control.setWidth(width)
         image_control.setHeight(height)
@@ -863,7 +869,7 @@ class StarWarsScreensaver(ScreensaverBase):
         image_control.setWidth(width)
         image_control.setHeight(height)
         image_control.setAnimations(animations)
-        image_control.setImage(imageDetails['file'])
+        image_control.setImage(imageDetails['file'].decode('utf-8'))
         # show the image
         image_control.setVisible(True)
 
@@ -914,7 +920,7 @@ class RandomZoomInScreensaver(ScreensaverBase):
         zoom_y = random.randint(0, 720)
         animations = [('conditional', self.ZOOM_ANIMATION % (zoom_x, zoom_y, self.EFFECT_TIME))]
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'])
+        image_control.setImage(imageDetails['file'].decode('utf-8'))
         image_control.setPosition(x_position, y_position)
         image_control.setWidth(width)
         image_control.setHeight(height)
@@ -965,7 +971,7 @@ class AppleTVLikeScreensaver(ScreensaverBase):
             zoom = int(random.betavariate(2, 2) * 40) + 10
             # zoom = int(random.randint(10, 70))
             width = 1280 / 100 * zoom
-            image_control.setWidth(width)
+            image_control.setWidth(int(width))
         self.image_controls = sorted(self.image_controls, key=lambda c: c.getWidth())
         self.xbmc_window.addControls(self.image_controls)
         random.shuffle(self.image_controls)
@@ -988,8 +994,8 @@ class AppleTVLikeScreensaver(ScreensaverBase):
 
         animations = [('conditional', self.MOVE_ANIMATION % time)]
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'])
-        image_control.setPosition(x_position, y_position)
+        image_control.setImage(imageDetails['file'].decode('utf-8'))
+        image_control.setPosition(int(x_position), int(y_position))
         image_control.setWidth(width)
         image_control.setHeight(height)
         image_control.setAnimations(animations)
@@ -1056,7 +1062,7 @@ class GridSwitchScreensaver(ScreensaverBase):
         if not self.image_count < self.getFastImageCount():
             image_control.setAnimations(self.fadeOutAnimations)
             xbmc.sleep(self.EFFECT_TIME)
-        image_control.setImage(imageDetails['file'])
+        image_control.setImage(imageDetails['file'].decode('utf-8'))
         image_control.setAnimations(self.fadeInAnimations)
 
 
@@ -1115,7 +1121,7 @@ class SliderScreensaver(ScreensaverBase):
             x_position = int((1280 - width) / 2)
 
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'])
+        image_control.setImage(imageDetails['file'].decode('utf-8'))
         image_control.setPosition(x_position, y_position)
         image_control.setWidth(width)
         image_control.setHeight(height)
@@ -1175,7 +1181,7 @@ class CrossfadeScreensaver(ScreensaverBase):
             x_position = int((1280 - width) / 2)
 
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'])
+        image_control.setImage(imageDetails['file'].decode('utf-8'))
         image_control.setPosition(x_position, y_position)
         image_control.setWidth(width)
         image_control.setHeight(height)
