@@ -4,15 +4,13 @@ import sys
 import os
 import traceback
 import threading
+from itertools import cycle
 import xbmc
 import xbmcaddon
 import xbmcvfs
 import xbmcgui
 
-if sys.version_info >= (2, 7):
-    import json
-else:
-    import simplejson as json
+import json
 
 from resources.lib.settings import ScreensaverSettings
 from resources.lib.settings import log
@@ -28,18 +26,7 @@ from themeFinder import ThemeFiles
 
 ADDON = xbmcaddon.Addon(id='screensaver.tvtunes')
 CWD = ADDON.getAddonInfo('path')
-MEDIA_DIR = xbmcvfs.translatePath(os.path.join(CWD, 'resources', 'media').encode("utf-8"))
-
-
-# Helper method to allow the cycling through a list of values
-def _cycle(iterable):
-    saved = []
-    for element in iterable:
-        yield element
-        saved.append(element)
-    while saved:
-        for element in saved:
-            yield element
+MEDIA_DIR = xbmcvfs.translatePath(os.path.join(CWD, 'resources', 'media'))
 
 
 # Class used to create the correct type of screensaver class
@@ -65,11 +52,15 @@ class ExitMonitor(xbmc.Monitor):
     # and stop the screensaver
     def __init__(self, exit_callback):
         self.exit_callback = exit_callback
+        # Kodi's playlist player calls WakeUpScreenSaverAndDPMS() on any play
+        # command, which fires onScreensaverDeactivated. When playing themes,
+        # we must ignore that event and rely on ScreensaverWindow.onAction instead.
+        self.playing_theme = False
 
     # Called when the screensaver should be stopped
     def onScreensaverDeactivated(self):
-        # Make the callback to stop the screensaver
-        self.exit_callback()
+        if not self.playing_theme:
+            self.exit_callback()
 
 
 # The Dialog used to display the screensaver in
@@ -78,11 +69,9 @@ class ScreensaverWindow(xbmcgui.WindowDialog):
     def __init__(self, exit_callback):
         self.exit_callback = exit_callback
 
-    # Handle the action to exit the screensaver
+    # Any user input (key, remote, mouse) should exit the screensaver
     def onAction(self, action):
-        action_id = action.getId()
-        if action_id in [9, 10, 13, 92]:
-            self.exit_callback()
+        self.exit_callback()
 
 
 # Class to hold all of the media files used that are stored in the addon
@@ -105,8 +94,8 @@ class VolumeDrop(object):
         result = xbmc.executeJSONRPC('{"jsonrpc": "2.0", "method": "Application.GetProperties", "params": { "properties": [ "volume" ] }, "id": 1}')
 
         json_query = json.loads(result)
+        volume = 100
         if ("result" in json_query) and ('volume' in json_query['result']):
-            # Get the volume value
             volume = json_query['result']['volume']
 
         log("VolumeDrop: current volume: %s%%" % str(volume))
@@ -125,14 +114,14 @@ class VolumeDrop(object):
                 self._setVolume(self.reducedVolume)
             else:
                 log("Player: No reduced volume option set")
-        except:
+        except Exception:
             log("VolumeDrop: %s" % traceback.format_exc(), True, xbmc.LOGERROR)
 
     def restoreVolume(self):
         try:
             if self.reducedVolume > 0:
                 self._setVolume(self.original_volume)
-        except:
+        except Exception:
             log("VolumeDrop: %s" % traceback.format_exc(), True, xbmc.LOGERROR)
 
 
@@ -200,7 +189,9 @@ class ArtworkDownloaderSupport(object):
 
 # Class to hold groups of images and media
 class MediaGroup(object):
-    def __init__(self, videoPath="", title="", imageArray=[]):
+    def __init__(self, videoPath="", title="", imageArray=None):
+        if imageArray is None:
+            imageArray = []
         self.isPlayingTheme = False
         self.path = videoPath
         self.themePath = videoPath
@@ -243,14 +234,9 @@ class MediaGroup(object):
                 log("MediaGroup: Skipping %s" % self.path)
         return shouldSkip
 
-    # Add an image to the group, giving it's aspect radio
+    # Add an image to the group, giving it's aspect ratio
     def addImage(self, imageURL, aspectRatio):
-        try:
-            # Handle non ascii characters
-            safeImageURL = imageURL.encode('utf-8')
-        except:
-            safeImageURL = imageURL
-        imageDetails = {'file': safeImageURL, 'aspect_ratio': aspectRatio}
+        imageDetails = {'file': imageURL, 'aspect_ratio': aspectRatio}
         self.images.append(imageDetails)
 
     # Gets the number of images in the group
@@ -325,9 +311,19 @@ class MediaGroup(object):
 
                     # Wait for the audio to start before setting the repeat to only once
                     maxLoops = 100
-                    while xbmc.Player().isPlayingAudio() and (maxLoops > 0):
+                    while not xbmc.Player().isPlayingAudio() and (maxLoops > 0):
                         maxLoops = maxLoops - 1
                         xbmc.sleep(5)
+
+                    # Kodi sets a 15-second alarm ("sssssscreensaver") that
+                    # runs StopScript when WakeUpScreenSaverAndDPMS fires from
+                    # Player.play(). Neutralize it two ways:
+                    # 1) Replace the alarm — Start() internally calls Stop()
+                    #    on the existing alarm before creating the new one
+                    # 2) Then cancel the replacement
+                    log("Screensaver: Neutralizing screensaver kill alarm")
+                    xbmc.executebuiltin('AlarmClock(sssssscreensaver,Action(noop),9999,true)', True)
+                    xbmc.executebuiltin('CancelAlarm(sssssscreensaver,true)', True)
 
                     # Check what the existing state for the player if we are going to play themes
                     if xbmc.getCondVisibility('Playlist.IsRepeat') or xbmc.getCondVisibility('Playlist.IsRepeatOne'):
@@ -402,8 +398,7 @@ class BackgroundUpdater(object):
 
     def startProcessing(self):
         # Create a thread to gather all the data in the background
-        self.athread = threading.Thread(target=self.loadExtraData)
-        self.athread.setDaemon(True)
+        self.athread = threading.Thread(target=self.loadExtraData, daemon=True)
         self.athread.start()
         log("BackgroundUpdater: Thread started")
 
@@ -417,7 +412,7 @@ class BackgroundUpdater(object):
                 # Make sure the thread is dead at this point
                 try:
                     self.athread.join(3)
-                except:
+                except Exception:
                     log("BackgroundUpdater: Thread join error: %s" % traceback.format_exc(), True, xbmc.LOGERROR)
 
     def loadExtraData(self):
@@ -457,6 +452,7 @@ class ScreensaverBase(object):
         self.stack_cycle_controls()
 
         self.backgroundUpdate = None
+        self._theme_was_started = False
         log('Screensaver: __init__ end')
 
     def _init_cycle_controls(self):
@@ -514,8 +510,8 @@ class ScreensaverBase(object):
         volumeCtrl = VolumeDrop()
         volumeCtrl.lowerVolume()
 
-        imageGroup_cycle = _cycle(imageGroups)
-        image_controls_cycle = _cycle(self.image_controls)
+        imageGroup_cycle = cycle(imageGroups)
+        image_controls_cycle = cycle(self.image_controls)
         self._hide_loading_indicator()
         imageGroup = next(imageGroup_cycle)
 
@@ -526,62 +522,89 @@ class ScreensaverBase(object):
         self.backgroundUpdate = BackgroundUpdater(imageGroups)
         self.backgroundUpdate.startProcessing()
 
-        while not self.exit_requested:
-            log('Screensaver: Using image: %s' % repr(imageDetails['file']))
+        # Kodi's playlist player fires WakeUpScreenSaverAndDPMS on any play
+        # command, which would immediately kill this screensaver via
+        # onScreensaverDeactivated. Suppress that callback when themes may play.
+        if ScreensaverSettings.isPlayThemes():
+            self.exit_monitor.playing_theme = True
 
-            # Start playing theme if there is one
-            imageGroup.startTheme(self.getFastImageCount())
-            # Get the next control and set it displaying the image
-            image_control = next(image_controls_cycle)
-            
-            if isinstance(image_control, bytes):
-                image_control_str = image_control.decode('utf-8')
-            else:
-                image_control_str = image_control # It's already a string
+        try:
+            while not self.exit_requested:
+                log('Screensaver: Using image: %s' % repr(imageDetails['file']))
 
-            self.process_image(image_control_str, imageDetails)
-            # Now that we are showing the last image, load up the next one
-            imageDetails = imageGroup.getNextImage()
-
-            # At this point we have moved the image onto the next one
-            # so check if we have gone in a complete loop and there is
-            # another group of images to pre-load
-
-            # Wait for the theme to complete playing at least once, if it has not
-            # completed playing the theme at least once, then we can safely repeat
-            # the images we show
-            if (len(imageGroups) > 1) and imageGroup.completedGroup():
-                log("Screensaver: Moving to play next group")
-                # Move onto the next group, and the first image in that group
-                imageGroup = next(imageGroup_cycle)
-                # If there are no images in this group, skip to the next (We know there
-                # is at least one group with images as we have already checked that before the loop)
-                while imageGroup.imageCount(True) < 1:
-                    imageGroup = next(imageGroup_cycle)
-                # Get the next image from the new group
+                # Start playing theme if there is one
+                imageGroup.startTheme(self.getFastImageCount())
+                if imageGroup.isPlayingTheme:
+                    self._theme_was_started = True
+                # Periodically re-cancel the alarm in case Kodi re-sets it
+                if self._theme_was_started:
+                    xbmc.executebuiltin('CancelAlarm(sssssscreensaver,true)')
+                # Get the next control and set it displaying the image
+                image_control = next(image_controls_cycle)
+                self.process_image(image_control, imageDetails)
+                # Now that we are showing the last image, load up the next one
                 imageDetails = imageGroup.getNextImage()
 
-            if self.image_count < self.getFastImageCount():
-                self.image_count += 1
-            else:
-                # Pre-load the next image that is going to be shown
-                self._preload_image(imageDetails['file'].decode('utf-8'))
-                # Wait before showing the next image
-                self.wait()
+                # At this point we have moved the image onto the next one
+                # so check if we have gone in a complete loop and there is
+                # another group of images to pre-load
 
-        # Make sure we are not still gathering images
-        if self.backgroundUpdate is not None:
-            self.backgroundUpdate.stopProcessing()
-            self.backgroundUpdate = None
+                # Wait for the theme to complete playing at least once, if it has not
+                # completed playing the theme at least once, then we can safely repeat
+                # the images we show
+                if (len(imageGroups) > 1) and imageGroup.completedGroup():
+                    log("Screensaver: Moving to play next group")
+                    # Move onto the next group, and the first image in that group
+                    imageGroup = next(imageGroup_cycle)
+                    # Skip groups with no images, but stop after a full cycle
+                    # to avoid infinite loop if background loading cleared all groups
+                    skipped = 0
+                    while imageGroup.imageCount(True) < 1:
+                        skipped += 1
+                        if skipped >= len(imageGroups):
+                            break
+                        imageGroup = next(imageGroup_cycle)
+                    # Get the next image from the new group
+                    imageDetails = imageGroup.getNextImage()
 
-        # Make sure we stop any outstanding playing theme
-        imageGroup.stopTheme()
+                if self.image_count < self.getFastImageCount():
+                    self.image_count += 1
+                else:
+                    # Pre-load the next image that is going to be shown
+                    self._preload_image(imageDetails['file'])
+                    # Wait before showing the next image
+                    self.wait()
+        finally:
+            log('Screensaver: start_loop cleanup (exit_requested=%s)' % self.exit_requested)
 
-        # Now restore the volume to what it should be
-        volumeCtrl.restoreVolume()
-        del volumeCtrl
+            # If we didn't exit voluntarily, Kodi killed us (StopScript alarm
+            # or reactivation). Schedule a restart so the screensaver comes back.
+            if not self.exit_requested and self._theme_was_started:
+                try:
+                    log("Screensaver: Scheduling restart")
+                    xbmc.executebuiltin('AlarmClock(tvtunes_restart,ActivateScreensaver,0:03,true)')
+                except Exception:
+                    pass
 
-        log('Screensaver: start_loop end')
+            # Make sure we are not still gathering images
+            if self.backgroundUpdate is not None:
+                self.backgroundUpdate.stopProcessing()
+                self.backgroundUpdate = None
+
+            # Make sure we stop any outstanding playing theme
+            imageGroup.stopTheme()
+
+            # Safety net: completedGroup() can clear isPlayingTheme between
+            # playlist tracks, causing stopTheme() to miss a still-playing
+            # player. Force-stop if we ever started a theme.
+            if self._theme_was_started and xbmc.Player().isPlayingAudio():
+                xbmc.Player().stop()
+
+            # Now restore the volume to what it should be
+            volumeCtrl.restoreVolume()
+            del volumeCtrl
+
+            log('Screensaver: start_loop end')
 
     # Gets the set of images that are going to be used
     def _getImageGroups(self):
@@ -602,7 +625,7 @@ class ScreensaverBase(object):
                 imgGrp = self._getFolderImages(path)
                 imageGroups.extend(imgGrp)
         if not imageGroups and not self.exit_requested:
-            cmd = 'Notification("{0}", "{1}")'.format(ADDON.getLocalizedString(32101).encode('utf-8'), ADDON.getLocalizedString(32995).encode('utf-8'))
+            cmd = 'Notification("{0}", "{1}")'.format(ADDON.getLocalizedString(32101), ADDON.getLocalizedString(32995))
             xbmc.executebuiltin(cmd)
         return imageGroups
 
@@ -656,13 +679,13 @@ class ScreensaverBase(object):
     def _getFolderImages(self, path):
         log('Screensaver: getFolderImages for path: %s' % repr(path))
         dirs, files = xbmcvfs.listdir(path)
-        images = [xbmc.validatePath(path + f) for f in files
+        images = [xbmcvfs.validatePath(path + f) for f in files
                   if f.lower()[-3:] in ('jpg', 'png', 'gif')]
         if ScreensaverSettings.isRecursive() and not self.exit_requested:
             for directory in dirs:
                 if directory.startswith('.'):
                     continue
-                images.extend(self._getFolderImages(xbmc.validatePath('/'.join((path, directory, '')))))
+                images.extend(self._getFolderImages(xbmcvfs.validatePath('/'.join((path, directory, '')))))
         log("Screensaver: Found %d images for %s" % (len(images), path))
         mediaGroup = MediaGroup(imageArray=images)
         return [mediaGroup]
@@ -720,7 +743,6 @@ class ScreensaverBase(object):
     def stop(self):
         log('Screensaver: stop')
         self.exit_requested = True
-        self.exit_monitor = None
 
     def close(self):
         # Delete all the controls on close
@@ -738,6 +760,9 @@ class ScreensaverBase(object):
         if self.backgroundUpdate is not None:
             self.backgroundUpdate.stopProcessing()
             self.backgroundUpdate = None
+        # Last-resort cleanup if start_loop didn't stop the theme
+        if self._theme_was_started and xbmc.Player().isPlayingAudio():
+            xbmc.Player().stop()
 
 
 # Shows the images as if they are being dropped one after the other onto a table
@@ -798,7 +823,7 @@ class TableDropScreensaver(ScreensaverBase):
                       ('conditional', self.ROTATE_ANIMATION % (rotation_degrees, rotation_duration)),
                       ('conditional', self.DROP_ANIMATION % (drop_height, drop_duration))]
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'].decode('utf-8'))
+        image_control.setImage(imageDetails['file'])
         image_control.setPosition(x_position, y_position)
         image_control.setWidth(width)
         image_control.setHeight(height)
@@ -869,7 +894,7 @@ class StarWarsScreensaver(ScreensaverBase):
         image_control.setWidth(width)
         image_control.setHeight(height)
         image_control.setAnimations(animations)
-        image_control.setImage(imageDetails['file'].decode('utf-8'))
+        image_control.setImage(imageDetails['file'])
         # show the image
         image_control.setVisible(True)
 
@@ -920,7 +945,7 @@ class RandomZoomInScreensaver(ScreensaverBase):
         zoom_y = random.randint(0, 720)
         animations = [('conditional', self.ZOOM_ANIMATION % (zoom_x, zoom_y, self.EFFECT_TIME))]
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'].decode('utf-8'))
+        image_control.setImage(imageDetails['file'])
         image_control.setPosition(x_position, y_position)
         image_control.setWidth(width)
         image_control.setHeight(height)
@@ -994,7 +1019,7 @@ class AppleTVLikeScreensaver(ScreensaverBase):
 
         animations = [('conditional', self.MOVE_ANIMATION % time)]
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'].decode('utf-8'))
+        image_control.setImage(imageDetails['file'])
         image_control.setPosition(int(x_position), int(y_position))
         image_control.setWidth(width)
         image_control.setHeight(height)
@@ -1062,7 +1087,7 @@ class GridSwitchScreensaver(ScreensaverBase):
         if not self.image_count < self.getFastImageCount():
             image_control.setAnimations(self.fadeOutAnimations)
             xbmc.sleep(self.EFFECT_TIME)
-        image_control.setImage(imageDetails['file'].decode('utf-8'))
+        image_control.setImage(imageDetails['file'])
         image_control.setAnimations(self.fadeInAnimations)
 
 
@@ -1121,7 +1146,7 @@ class SliderScreensaver(ScreensaverBase):
             x_position = int((1280 - width) / 2)
 
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'].decode('utf-8'))
+        image_control.setImage(imageDetails['file'])
         image_control.setPosition(x_position, y_position)
         image_control.setWidth(width)
         image_control.setHeight(height)
@@ -1181,7 +1206,7 @@ class CrossfadeScreensaver(ScreensaverBase):
             x_position = int((1280 - width) / 2)
 
         # set all parameters and properties
-        image_control.setImage(imageDetails['file'].decode('utf-8'))
+        image_control.setImage(imageDetails['file'])
         image_control.setPosition(x_position, y_position)
         image_control.setWidth(width)
         image_control.setHeight(height)
@@ -1202,7 +1227,8 @@ class CrossfadeScreensaver(ScreensaverBase):
 if __name__ == '__main__':
     # Launch the screensaver and deal with all the work to tidy it up afterwards
     screensaver = ScreensaverManager()
-    screensaver.start_loop()
-    screensaver.close()
-    del screensaver
-    sys.modules.clear()
+    try:
+        screensaver.start_loop()
+    finally:
+        screensaver.close()
+        del screensaver
